@@ -1,0 +1,457 @@
+
+# Shiny App code
+
+list.of.packages <- c("shinydashboard", "shiny", "ggplot2","DescTools", "rpivotTable",
+                       "htmltools", "htmlTable", "DT", "rvest", "plotly", 
+                       "dplyr", "rgdal", "RColorBrewer", "rgeos","
+                       "visNetwork", "memisc", "xlsx")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+## app.R ##
+library(shinydashboard)
+library(shiny)
+library(ggplot2)
+library(DescTools)
+library(htmltools)
+library(htmlTable)
+library(DT)
+library(grid)
+library(ggpubr)
+library(magrittr)
+library(foreign)
+library(plotly)
+library(xlsx)
+library(rgdal)
+library(questionr)
+
+# Get data
+
+setwd("/home/ubuntu/brexitR")
+# setwd("C:/Users/Isabel Taylor/Documents/mrpdashboard/brexit") # For desktop
+
+predictionData_wide  <- read.csv("All predictions from MRP.csv") # Estimates from MRP model
+
+# Load individual data
+# Individual data
+individualData <- readRDS("pollingDataWeighted_2.rds") # Polling data weighted from previous R code
+individualData$variables$wt <- weights(individualData) # Generate weights as variable for some code below
+
+# Load maps - already generated in previous loop
+changesMap <- readRDS("changesMap.rds")
+predictionsMap <- readRDS("predictionsMap.rds")
+regulationsMap <- readRDS("manRegs_Map.rds")
+tradeLimitsMap <- readRDS("tradeLimits_Map.rds")
+goodsChecks_Map <- readRDS("goodsChecks_Map.rds")
+fomMap <- readRDS("fom_Map.rds")
+acceptDealMap <- readRDS("acceptDeal_Map.rds")
+changesMap_constituencies <- readRDS("changesMap_constituencies.rds")
+predictionsMap_constituencies <- readRDS("predictionsMap_constituencies.rds")
+regulationsMap_constituencies <- readRDS("manRegs_Map_constituencies.rds")
+tradeLimitsMap_constituencies <- readRDS("tradeLimits_Map_constituencies.rds")
+goodsChecks_Map_constituencies <- readRDS("goodsChecks_Map_constituencies.rds")
+fomMap_constituencies <- readRDS("fom_Map_constituencies.rds")
+acceptDealMap_constituencies <- readRDS("acceptDeal_Map_constituencies.rds")
+
+# Shiny settings
+
+ui <- tagList(
+  tags$head(tags$script(type="text/javascript", src = "code.js")),
+  
+  tags$script(HTML("var header = $('.navbar > .container-fluid');
+                   header.append('<div style=/"float:right/"><a href=/"URL/"><img src=/"https://www.survation.com/wp-content/themes/Survation2018/images/logo.png/" alt=/"alt/" style=/"float:right; width:33px; height:41px;padding-top:10px;/"> </a></div>');                                 #SAME LINE
+
+                   ")
+  ),
+  
+  navbarPage("Brexit: What the nation thinks now", windowTitle = "Data dashboard",
+             
+             tabPanel("UK Map", 
+                      
+                      fluidPage(fluidRow(
+                        
+                        div(class="outer",
+                            
+                            tags$head(
+                              # Include our custom CSS
+                              includeCSS("styles.css"),
+                              includeScript("gomap.js"),
+			      includeHTML("analytics.html")
+                            ),
+                            
+                            leafletOutput("map", width = "100%", height = 900),
+                            
+                            # Shiny versions prior to 0.11 should use class = "modal" instead.
+                            absolutePanel(id = "explainer", class = "panel panel-default", fixed = FALSE,
+                                          draggable = TRUE, bottom = "auto", right = "auto", 
+                                          left = 40, top = 100,
+                                          width = 350, height = "auto",
+                                          
+                                          h2("Show me predictions for..."),
+                                          
+                                          br(),
+                                          
+                                          radioButtons("geographyLevel", 
+                                                       "Select geography to display", 
+                                                       c("Local authorities",
+                                                         "Westminster constituencies"), 
+                                                       selected = "Local authorities", 
+                                                       inline = FALSE,
+                                                       width = NULL),
+                                          
+                                          br(),
+                                          
+                                          selectInput("variableMap", "Select data to display:",
+                                                      c("Estimated leave vote share in 2018" = "Estimate.leave.vote.share.2018",
+                                                        "Estimated change in remain support since 2016" = "Change.in.support.for.Leave",
+                                                        "Estimated support for current Brexit deal" = "Estimate.deal",
+                                                        "Estimated support for deal that required goods checks in Irish sea" = "goodsChecks",
+                                                        "Estimated support for deal that required limits on trade deals" = "tradeLimits",
+                                                        "Estimated support for deal that required freedom of movement" = "fom",
+                                                        "Estimated support for deal that required EU regulations on manufactured goods" = "manRegs"
+                                                      ),
+                                                      selected = "Estimate.leave.vote.share.2018"),
+                                          
+                                          br(),
+                                          
+                                          h5("Between 20th October and 2nd November 2018, Survation asked Brexit related questions to over 20,000 people across the UK."),
+                                          
+                                          br(),
+                                          
+                                          textOutput("mapGeographyExplainer"),
+                                         
+                                          br(),
+                                          
+                                          h5("Zoom in or out:"),
+                                          
+                                          actionButton("map_zoom_out", "-"),
+                                          actionButton("map_zoom_in", "+")
+                                          
+                                          )
+                            
+                            ))
+                        
+                      )),
+             tabPanel("Data explorer",
+                      fluidPage(fluidRow(
+                        column(2,
+                               selectInput("geographyDisplay", "Select geographies to display:",
+                                           c("Local authorities", "Westminster constituencies"
+                                           ),
+                                           selected = "Local authorities"))),
+                        fluidRow(
+                        column(2,
+                               selectInput("region", "Region", c("All regions"="",
+                                                                 levels(predictionData_wide$Region)[order(levels(predictionData_wide$Region))]),
+                                           multiple=TRUE)
+                      ),
+                      fluidRow(
+                        column(2,
+                               numericInput("minScoreA", "Min: Estimated support for Leave", min=0, max=100, value=0),
+                        ),
+                        column(2,
+                               numericInput("minScoreB", "Min:  Estimated change in support for Remain", min=-20, max=20, value=-20),
+                        )
+                      ),
+                      hr(),
+                      DT::dataTableOutput("ziptable"),
+                      inputPanel(
+                        downloadButton('downloadDataC', 'Download'))
+                      )),
+
+tabPanel("Demographic breakdowns",
+                                 sidebarLayout(
+                                   sidebarPanel(
+                                     fluidRow(
+
+                                       h4("Select from the options below to investigate demographic differences in responses to this survey."),
+
+                                       # input1 <- box(
+                                       selectInput("question1",
+                                                   "Question:",
+                                                   c("Vote in an in/out referendum" = "v9",
+                                                     "Vote on government's Brexit deal" = "var417",
+                                                     "What should happen if no deal can be reached" = "var382",
+                                                     "Impact of Brexit on immigration" = "var421",
+                                                     "Impact of Brexit on the NHS" = "var420",
+                                                     "Impact of Brexit on the UK's economy" = "var419")
+                                       ),
+                                       # input2 <- box(
+                                       selectInput("variable1",
+                                                   "Variable:",
+                                                   c("Sex" = "sex_cb",
+                                                     "Age group" = "ageGroup_cb",
+                                                     "Ethnicity" = "ethnicity_cb",
+                                                     "Region" = "region_cb",
+                                                     "Income" = "income_cb",
+                                                     "Education" = "education_cb",
+                                                     "Employment" = "employment_cb",
+                                                     "2016 Ref Vote" = "euRefVote_cb",
+                                                     "2017 GE Vote" = "pastVote2017",
+                                                     "Current EU Vote Intention" = "vi_eu",
+                                                     "Current GE Vote Intention" = "vi",
+                                                     "Views on immigration" =  "var401") #)
+                                       ),
+                                       # input3 <- box(
+                                       selectInput("display",
+                                                   "Display:",
+                                                   c('Percentages' = "percentages", 
+                                                     'Frequencies' = "frequencies")),
+                                       
+                                       checkboxGroupInput("group", 
+                                                          label = h4("Remove resposes:"), 
+                                                          choices = c("Don't know" = toupper("Dont Know"), 
+                                                                      'Undecided' = toupper("Undecided"),
+                                                                      "Would not vote" = toupper("I would not vote"))),
+
+                                       h5("The data used in these graphs is from a sample of 20,090 people across the UK and has been weighted to reflect the UK population.")
+
+                                     )
+                                   ),
+                                   mainPanel(
+                                     conditionalPanel(
+                                       condition = "input.display == 'percentages'",
+                                       plotlyOutput("plot1")),
+                                     conditionalPanel(
+                                       condition = "input.display == 'frequencies'",
+                                       plotlyOutput("plot2"))
+                                   )
+                                 )
+                        ),
+
+            tabPanel(title=HTML("<li><a href='http://panel.survation.com' target='_blank'><b><i><font color='white'>Join Survation's opinion panel!</font></i></b>")),
+            
+            tabPanel(title=HTML("<li><a href='https://www.survation.com/what-is-mrp/' target='_blank'><i>Find out more about MRP</i>"))
+  ))
+
+
+server <- function(input, output, session) {
+  
+  output$mapGeographyExplainer <- renderText({ 
+    paste("This map shows estimates for all", input$geographyLevel, "generated by multi-level regression and post stratification (MRP) using responses to each question.")
+  })
+
+  output$map <- renderLeaflet({
+    
+    if(input$geographyLevel=="Local authorities"){
+    
+    if(input$variableMap == "Estimate.leave.vote.share.2018"){
+      predictionsMap}
+
+    else if(input$variableMap == "Change.in.support.for.Leave"){
+      changesMap
+    }
+
+    else if(input$variableMap == "Estimate.deal"){
+      acceptDealMap
+      }
+    
+    else if(input$variableMap == "goodsChecks"){
+      goodsChecks_Map
+      }
+    
+    else if(input$variableMap == "fom"){
+      fomMap
+      }
+    
+    else if(input$variableMap == "manRegs"){
+      regulationsMap
+      }
+    
+    else if(input$variableMap == "tradeLimits"){
+      tradeLimitsMap
+    }
+    }else{
+      if(input$variableMap == "Estimate.leave.vote.share.2018"){
+        predictionsMap_constituencies
+        }
+      
+      else if(input$variableMap == "Change.in.support.for.Leave"){
+        changesMap_constituencies
+      }
+      
+      else if(input$variableMap == "Estimate.deal"){
+        acceptDealMap_constituencies
+      }
+      
+      else if(input$variableMap == "goodsChecks"){
+        goodsChecks_Map_constituencies
+      }
+      
+      else if(input$variableMap == "fom"){
+        fomMap_constituencies
+      }
+      
+      else if(input$variableMap == "manRegs"){
+        regulationsMap_constituencies
+      }
+      
+      else if(input$variableMap == "tradeLimits"){
+        tradeLimitsMap_constituencies
+      }
+    }
+    
+  })
+  
+  # Zoom control - zoom out
+  observeEvent(input$map_zoom_out ,{
+    leafletProxy("map") %>% 
+      setView(lat  = (input$map_bounds$north + input$map_bounds$south) / 2,
+              lng  = (input$map_bounds$east + input$map_bounds$west) / 2,
+              zoom = input$map_zoom - 1)
+  })
+  # Zoom control - zoom in
+  observeEvent(input$map_zoom_in ,{
+    leafletProxy("map") %>% 
+      setView(lat  = (input$map_bounds$north + input$map_bounds$south) / 2,
+              lng  = (input$map_bounds$east + input$map_bounds$west) / 2,
+              zoom = input$map_zoom + 1)
+  })
+  
+  
+  ## Data Explorer ##
+
+  output$ziptable <- DT::renderDataTable({
+    df <- predictionData_wide[, !names(predictionData_wide) %like% "%Code%"] %>%
+      mutate(`2016 Leave vote` = round(Leave.vote.share.2016*100, 4), 
+             `2018 Leave vote estimate` = round(Estimate.leave.vote.share.2018*100, 4),
+             `Estimated change in Leave support` = round(Change.in.support.for.Leave*100, 4),
+             `Estimated % would accept government's deal` = round(X..would.accept.the.deal*100, 4),
+             `Estimated % think checks in Irish Sea acceptable` = round(X..think.goods.checks.acceptable*100, 4),
+             `Estimated % think FoM acceptable` = round(X..think.live.work.in.other.countries.acceptable*100, 4),
+             `Estimated % think manufacturing regulations acceptable` = round(X..think.manufacturing.regulations.acceptable*100, 4),
+             `Estimated % think limits on trade deals acceptable` = round(X..think.limits.of.trade.deals.acceptable*100, 4)) %>%
+      dplyr::select(-contains(".")) %>%
+      # dplyr::select("Region" = Region,
+                    # "Name" = Name,
+                    # "2016 Leave vote share" = Leave.vote.share.2016, 
+                    # "2018 Leave vote estimate" = Estimate.leave.vote.share.2018,
+                    # "Estimated change in Leave support" = Change.in.support.for.Leave,
+                    # "Estimated % would accept government's deal" = X..would.accept.the.deal,
+                    # "Estimated % think checks in Irish Sea acceptable" = X..think.goods.checks.acceptable,                
+                    # "Estimated % think FoM acceptable" = X..think.live.work.in.other.countries.acceptable,
+                    # "Estimated % think manufacturing regulations acceptable" = X..think.manufacturing.regulations.acceptable,   
+                    # "Estimated % think limits on trade deals acceptable" = X..think.limits.of.trade.deals.acceptable) %>%
+      # mutate(Turnout17 = round(Turnout17, 2)) %>%
+      filter(
+        `2018 Leave vote estimate` >= input$minScoreA,
+        `2018 Leave vote estimate` <= input$maxScoreA,
+        `Estimated change in Leave support` >= input$minScoreB,
+        `Estimated change in Leave support` <= input$maxScoreB,
+        is.null(input$region) | Region %in% input$region,
+        is.null(input$constituencies) | Name %in% input$constituencies,
+        geographies == input$geographyDisplay
+      ) %>%
+      dplyr::select(-contains("geographies")) %>%
+      dplyr::arrange(Name)
+    
+    action <- DT::dataTableAjax(session, df)
+    
+    DT::datatable(df)
+  })
+  
+  # show df as DT::datatable
+  output$aConstituencyTable <- DT::renderDataTable({
+    DT::datatable(df, rownames = FALSE)
+  })
+  
+  output$downloadDataC <- downloadHandler(
+    filename <- "predictionData_wide.csv",
+    content = function(file) {
+      write.csv(predictionData_wide, file,
+                row.names = FALSE)
+    })
+
+# Demographic breakdown plots
+
+# Data for individual level plots
+  Mdata <- reactive({
+    
+    df <- individualData$variables[,names(individualData$variables) %in% c("wt", input$variable1, input$question1)]
+    colnames(df)[names(df)==input$variable1] <- "x"
+    colnames(df)[names(df)==input$question1] <- "y"
+    
+    df <- df %>% 
+      filter(!toupper(y) %in% input$group)
+    
+    df <- droplevels(df)
+    
+    df <- data.frame(wtd.table(df$x, df$y, weights = df$wt))
+    
+    df <- df %>%
+      mutate("Frequency" = round(Freq, 0),
+             "Response" = factor(Var2),
+             "Category" = Var1)
+  })
+  
+  Mdata.prop <- reactive({
+    df <- individualData$variables[,names(individualData$variables) %in% c("wt", input$variable1, input$question1)]
+    colnames(df)[names(df)==input$variable1] <- "x"
+    colnames(df)[names(df)==input$question1] <- "y"
+    
+    df <- df %>% 
+      filter(!toupper(y) %in% input$group)
+    
+    df <- droplevels(df)
+    
+  df <- data.frame(prop.table(wtd.table(df$x, df$y, weights = df$wt),1))
+  
+  df <- df %>%
+    mutate("Percentage" = round(Freq*100, 2),
+           "Response" = factor(Var2),
+           "Category" = Var1)
+  
+  })
+  
+  output$plot1 <- renderPlotly({
+    # Cross-tab bar chart
+    ggplotly(
+      ggplot(Mdata.prop(), 
+             aes(x = Category, y = Percentage)) + 
+        geom_bar(stat = "identity",
+                 aes(fill = Response)) +
+        scale_fill_brewer(palette = "Greens") +
+        theme(legend.position="bottom",
+              legend.title = element_blank(),
+              text = element_text(size=10),
+              panel.border = element_blank(),
+              panel.grid.major.x = element_blank(),
+              panel.grid.major.y = element_line(size = 0.1, linetype = "solid",
+                                                colour = "white"),
+              panel.grid.minor = element_blank(),
+              axis.line = element_line(size = 0.5, linetype = "solid",
+                                       colour = "black"),
+              plot.title = element_text(hjust=0, size=12)) +
+        coord_flip() +
+        labs(x = gsub("_cb", "", stringr::str_to_title(input$variable1)), y = "Percentage",
+             tag = "Produced by Survation"))
+  })
+  
+  
+  output$plot2 <- renderPlotly({
+    # Cross-tab bar chart
+    ggplotly(
+      ggplot(Mdata(), 
+             aes(x = Category, y = Frequency)) + 
+        geom_bar(stat = "identity",
+                 aes(fill = Response)) +
+        scale_fill_brewer(palette = "Greens") +
+        theme(legend.position="bottom",
+              legend.title = element_blank(),
+              text = element_text(size=10),
+              panel.border = element_blank(),
+              panel.grid.major.x = element_blank(),
+              panel.grid.major.y = element_line(size = 0.1, linetype = "solid",
+                                                colour = "white"),
+              panel.grid.minor = element_blank(),
+              axis.line = element_line(size = 0.5, linetype = "solid",
+                                       colour = "black"),
+              plot.title = element_text(hjust=0, size=12)) +
+        coord_flip() +
+        labs(x = gsub("_cb", "", stringr::str_to_title(input$variable1)), y = "Weighted frequency",
+             tag = "Produced by Survation"))
+  })
+
+}
+
+shinyApp(ui, server)
