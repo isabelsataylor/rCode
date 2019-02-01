@@ -1,0 +1,366 @@
+##########################################
+# Constituency estimates from BES Wave 9 #
+##########################################
+
+###################
+##   10/01/2017  ## 
+## Isabel Taylor ##
+###################
+
+#########################################
+############# Preliminaries #############
+#########################################
+
+# Install packages
+usePackage <- function(p) {
+  if (!is.element(p, installed.packages()[,1]))
+    install.packages(p, dep = TRUE)
+  require(p, character.only = TRUE)
+}
+
+usePackage('RODBC')
+usePackage('xlsx')
+usePackage('randomForest')
+usePackage('Hmisc')
+usePackage('caTools')
+usePackage('foreach')
+usePackage('doSNOW')
+usePackage('MASS')
+usePackage('pROC')
+usePackage('caret')
+usePackage('MASS')
+usePackage('ggplot2')
+
+# Set up direct connection
+cn <- odbcDriverConnect(paste0("driverDetails") 
+
+#########################################
+########### Load survey data ############
+#########################################
+
+setwd("C:/Users/Isabel Taylor") # Set as example and not linked to relevant info
+
+# Pre formatted data can be loaded #
+# BES Wave 9 #
+BES_data <- read.csv("BES_9_Formatted.csv")
+
+#########################################
+######### Load contextual data ##########
+#########################################
+
+# 1. 2015 GE election results
+
+electionResults2015 <- sqlQuery(cn, "select constituency, party, SUM(vote_share) as vote_share FROM(
+                                select constituency,
+                                CASE WHEN party = 'Labour' THEN 'Labour'
+                                WHEN party = 'Conservative' THEN 'Conservative'
+                                WHEN party = 'Lib Dem' THEN 'LibDem'
+                                WHEN party = 'Plaid Cymru' THEN 'Plaid'
+                                WHEN party = 'Green' THEN 'Green'
+                                WHEN party = 'SNP' THEN 'SNP'
+                                WHEN party = 'UKIP' THEN 'UKIP'
+                                ELSE 'Other' END as party,
+                                number_of_votes, vote_share
+                                FROM results.GEResults2015
+                                WHERE constituency IS NOT NULL) as intetermedTable
+                                GROUP BY constituency, party
+                                ORDER BY constituency, party")
+
+# Reshaping to change from long to wide dataset
+
+electionResults2015Wide <- reshape(electionResults2015,
+                                   idvar = "constituency",
+                                   timevar="party",
+                                   direction="wide")
+electionResults2015Wide[is.na(electionResults2015Wide)] <- 0
+electionResults2015Wide$total <- rowSums(electionResults2015Wide[,-1])
+electionResults2015Wide$constituency <- gsub(" \\(W\\)", "", electionResults2015Wide$constituency)
+
+# Diversity and education status
+
+contextualFactors <- read.csv("Contextual factors for EU Ref model.csv")
+pconsMatches <- read.csv("BES pcon matching table.csv") # need look up table for constituency of constituency names
+colnames(pconsMatches)[1] <- "constituency"
+
+contextualFactors <- merge(contextualFactors, pconsMatches,
+                           by.x="ConstituencyName",
+                           by.y="pcon2")
+						   
+# Load previously generated output as contextual data for each constituency
+
+# PCA context
+pcaContext <- read.xlsx("constituencyPCAoutput.xlsx", 1)
+contextualFactors <- merge(contextualFactors, pcaContext[,c(1,4,5)],
+                           by="constituency")
+
+# Anomie
+anomieconstituency <- read.csv("constituencAnomie - 2016-07-20.csv")
+contextualFactors <- merge(contextualFactors, anomieconstituency[,c(1:2)],
+                           by="constituency")
+
+# Diversity
+diversityconstituency <- read.csv("constituencyDiversity - 2016-07-20.csv")
+contextualFactors <- merge(contextualFactors, diversityconstituency,
+                           by="constituency")
+
+# Merge indivifual survey data and constituency data
+BES_data_merged <- merge(BES_data, electionResults2015Wide,
+                         by.x="pcon", by.y="constituency", all.x=T)
+BES_data_merged <- merge(BES_data_merged, contextualFactors,
+                         by.x="pcon", by.y="constituency", all.x=T)
+
+# Create var7 dummy
+BES_data_merged$var7 <- ifelse(BES_data_merged$var12=='var7', 1, 0)
+
+#########################################
+########## Variable selection ###########
+#########################################
+
+BES_data_merged$voteIntention <- BES_data_merged$generalElectionVoteW8_Know
+
+modelData <- dplyr::select(BES_data_merged, voteIntention,
+                           var1, var2, var3,
+                           var4, var5, var6, var7,
+                           var8, var9, var10, var11, var12,
+                           vote_share.Conservative, vote_share.Green,
+                           vote_share.Labour, vote_share.LibDem, vote_share.Other,
+                           vote_share.Plaid, vote_share.UKIP, Population.density,
+                           Born.in.UK, Unemployed, Retired, Economicallyy.Inactive, Degree,
+                           Anomie, Diversity, Education, anomie, Diversity,
+                           wt_full_W9)
+
+# Only England and Wales
+modelData <- subset(modelData, var12!='Scotland')
+
+modelData$var9 <- as.numeric(modelData$var9)
+modelData$Population.density <- as.numeric(modelData$Population.density)
+modelData$Born.in.UK <- as.numeric(modelData$Born.in.UK)
+modelData$Unemployed <- as.numeric(modelData$Unemployed)
+modelData$Retired <- as.numeric(modelData$Retired)
+modelData$Economicallyy.Inactive <- as.numeric(modelData$Economicallyy.Inactive)
+modelData$Degree <- as.numeric(modelData$Degree)
+modelData$Anomie <- as.numeric(modelData$Anomie)
+
+# Drop levels
+modelData <- droplevels(modelData)
+
+#########################################
+########### Pre-Process Data ############
+#########################################
+
+# Missing data detection
+
+pct_nonmissing <- function(x) mean (!is.na(x))
+unlist(lapply(modelData, pct_nonmissing))
+
+# Identigy rows with missing response variable
+
+completeFun <- function(data, desiredCols) {
+  completeVec <- complete.cases(data[, desiredCols])
+  completeVec
+}
+
+remove_obs <- completeFun(modelData, "voteIntention")
+
+# Impute missing values - mixed imputation by predictive mean matching with aregImpute() from Hmisc
+
+n <- names(modelData)
+f <- as.formula(paste(" ~ ", paste(n[!n %in% c("wt_fullW9")], collapse = " + ")))
+
+trainImputeModel <- aregImpute(f, data=modelData, type='pmm', n.impute=40)
+
+modelData_imp <- impute.transcan(trainImputeModel, data=modelData, imputation=10, list.out=TRUE,  pr=FALSE, check=FALSE)
+i <- modelData
+i[names(modelData_imp)] <- modelData_imp
+modelData_imp <- i
+
+# Remove imputed DVs
+modelData_imp <- modelData_imp[remove_obs,]
+
+# Create ordered variables where appropriate
+
+modelData_imp$var3 <- ordered(modelData_imp$var3)
+modelData_imp$var4 <- ordered(modelData_imp$var4)
+
+# Created dummy variables
+
+modelData_imp_DV <- model.matrix(~., data=modelData_imp[,-1])
+VSD <- cbind(modelData_imp$voteIntention,as.data.frame(modelData_imp_DV[,-1]))
+colnames(VSD)[1] <- "voteIntention"
+
+# Remove punctuation and spaces from data frame headers
+
+names(VSD) <- gsub("[[:punct:]]|[[:space:]]", "", names(VSD))
+
+# Give generic names for reproductability of code
+
+dataSet <- VSD
+names(dataSet)[names(dataSet)=="voteIntention"] <- "y"
+names(dataSet)[names(dataSet)=="wtfullW9"] <- "wt"
+predictorsNames <- names(dataSet)[names(dataSet) !="y"]
+
+# Need to make sure dependent variable to first column and weights to last
+
+source("MoveMe Function.R")
+dataSet <- dataSet[moveme(names(dataSet), "y first")]
+dataSet <- dataSet[moveme(names(dataSet), "wt last")]
+
+# Check for an remove near zero variance predictors
+
+nzv <- nearZeroVar(dataSet, saveMetrics = T)
+nzv[nzv$nzv,][1:10,]
+
+nzv <- nearZeroVar(dataSet)
+dataSet_nzv <- dataSet[, -nzv]
+
+# Check for remove any multicollinear predictors
+CorPred <- cor(dataSet_nzv[,-1])
+highlyCorPred <- findCorrelation(CorPred, cutoff = 0.75)
+dataSet_corr <- dataSet_nzv[,-highlyCorPred]
+CorPred2 <- cor(dataSet_corr[,-1])
+
+# Look at proportion of outcome variables - is proportion smaller than 15%?
+prop.table(table(dataSet$y))
+
+#########################################
+####### Create train & test sets ########
+#########################################
+
+# Split data for all models except glm and gbm
+
+set.seed(1234)
+splitIndex <- createDataPartition(dataSet$y, p=0.75, list=F)
+
+trainData <- dataSet[splitIndex,]
+postStratWeights <- trainData$wt
+trainData <- trainData[,-ncol(trainData)]
+
+testData <- dataSet[-splitIndex,]
+testData <- testData[,-ncol(testData)]
+
+# Split data for gbm - nzv predictors removed
+
+set.seed(1234)
+splitIndex_nzv <- createDataPartition(dataSet_nzv$y, p=0.75, list=F)
+
+trainData_nzv <- dataSet_nzv[splitIndex_nzv,]
+postStratWeights_nzv <- trainData_nzv$wt
+trainData_nzv <- trainData_nzv[,-ncol(trainData_nzv)]
+
+testData_nzv <- dataSet_nzv[-splitIndex_nzv,]
+testData_nzv <- testData_nzv[,-ncol(testData_nzv)]
+
+# Split data for glm - multicollinear predictors removed
+
+set.seed(1234)
+splitIndex_corr <- createDataPartition(dataSet_corr$y, p=0.75, list=F)
+
+trainData_corr <- dataSet_corr[splitIndex_corr,]
+postStratWeights_corr <- trainData_corr$wt
+trainData_corr <- trainData_corr[,-ncol(trainData_corr)]
+
+testData_corr <- dataSet_corr[-splitIndex_corr,]
+testData_corr <- testData_corr[,-ncol(testData_corr)]
+
+#########################################
+###### Specificy cross-validation #######
+#########################################
+
+fitControl <- trainControl(method = "repeatedcv",
+                           number= 5,
+                           repeats = 10,
+                           classProbs = T, # Estimate class probabilities
+                           summaryFunction = twoClassSummary # evaluate performance
+                           )
+
+
+
+#########################################
+################ Models #################
+#########################################
+
+# Nnet Model
+
+cvCtrl <- trainControl(method="repeatedcv", repeats=10)
+
+modFit_1 <- train(y ~., method="nnet",
+                  trControl=cvCtrl, 
+                  data=trainData, 
+                  trace=TRUE, maxit=4000, 
+                  linout = 1)
+modFit_1a <- train(y ~., method="multinom",
+                  trControl=cvCtrl, 
+                  data=trainData, 
+                  trace=TRUE, maxit=4000, 
+                  linout = 1)
+modFit_1b <- train(y ~., method="stepQDA",
+                   trControl=cvCtrl, 
+                   data=trainData, 
+                   trace=TRUE, maxit=4000, 
+                   linout = 1)
+modFit_1c <- train(y ~., method="rf",
+                   trControl=cvCtrl, 
+                   data=trainData, 
+                   trace=TRUE, maxit=4000, 
+                   linout = 1)
+modFit_1d <- train(y ~., method="treebag",
+                   trControl=cvCtrl, 
+                   data=trainData, 
+                   trace=TRUE, maxit=4000, 
+                   linout = 1)
+modFit_1e <- train(y ~., method="bag",
+                   trControl=cvCtrl, 
+                   data=trainData, 
+                   trace=TRUE, maxit=4000, 
+                   linout = 1)
+modFit_1f <- train(y ~., method="ada",
+                   trControl=cvCtrl, 
+                   data=trainData, 
+                   trace=TRUE, maxit=4000, 
+                   linout = 1)
+modFit_1g <- train(y ~., method="blackboost",
+                   trControl=cvCtrl, 
+                   data=trainData, 
+                   trace=TRUE, maxit=4000, 
+                   linout = 1)
+modFit_2 <- train(y ~., method="nnet",
+                  trControl=cvCtrl, 
+                  data=trainData_nzv, 
+                  trace=TRUE, maxit=4000, 
+                  linout = 1)
+modFit_3 <- train(y ~., method="nnet",
+                  trControl=cvCtrl, 
+                  data=trainData_corr, 
+                  trace=TRUE, maxit=4000, 
+                  linout = 1)
+
+#########################################
+########## Model evaluations ############
+#########################################
+
+train_model_names <- list(modFit_1=modFit_1a,
+                          modFit_2=modFit_1b,
+                          modFit_3=modFit_1c)
+
+# Compute AUC scores
+test_roc <- function(model, data) {
+  library(pROC)
+  roc_obj <- roc(data$y,
+                 predict(model, data, type="prob") [, "Labour"],
+                 levels = c("Tory", "Labour", "UKIP", "Plaid", "LibDem", "Other", "Green", "SNP"))
+  auc(roc_obj)
+}
+
+train_models <- lapply(train_model_names, test_roc, data=testData)
+train_models <- lapply(train_models, as.vector)
+train_models <- do.call("rbind", train_models)
+colnames(train_models) <- "AUC"
+train_models <- as.data.frame(train_models)
+train_models
+
+#########################################
+########### Save best model #############
+#########################################
+
+bestModel <- train_model_names[which(train_models[,1] == max(train_models[,1]))]
+saveRDS(bestModel, "voteChoiceModel", Sys.Date(), ".rds")
