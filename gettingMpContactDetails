@@ -1,0 +1,77 @@
+
+##################
+### MP Details ###
+##################
+
+# Load relevant packages
+# install.packages("rvest")
+library(rvest)
+library(stringr)
+library(xml2)
+
+# Set web page infor etc
+url <- "https://www.parliament.uk/mps-lords-and-offices/mps/"
+pg <- read_html(url)
+
+# Define links to get one for each MP
+links <- html_attr(html_nodes(pg, "a"), "href")
+links <- links[links %like% "%biographies%"]
+
+# Function for missing
+html_text_na <- function(x, ...) {
+txt <- try(html_text(x, ...))
+  if (inherits(txt, "try-error") |
+      (length(txt)==0)) { return(NA) }
+  return(txt)
+}
+
+# Loop through for all links (for each MP) to extract information
+for(l in links){
+
+url_to_extract <- l
+
+bioData <- html(url_to_extract)
+
+name <- bioData %>%
+  html_nodes("h1") %>%
+  html_text_na() %>%
+  str_replace_all("[^[:alnum:] ]", "") %>% # Get rid of linebreaks and nonsense characters ([^[:alnum:] ] strips all non-alphanumeric)
+  str_trim # Get rid of whitespace on either end
+
+party <- bioData %>%
+  html_nodes("#commons-party") %>%
+  html_text_na() %>%
+  str_replace_all("[^[:alnum:] ]", "") %>%
+  str_trim
+
+wpc <- bioData %>%
+  html_nodes("#commons-constituency") %>%
+  html_text_na() %>%
+  str_replace_all("[^[:alnum:] ]", "") %>%
+  str_trim
+
+email <- bioData %>%
+  html_nodes("#ctl00_ctl00_FormContent_SiteSpecificPlaceholder_PageContent_addParliamentaryAddress_rptAddresses_ctl00_hypEmailAddress") %>%
+  html_text_na() %>%
+  str_trim
+
+phone <- bioData %>%
+  html_nodes("#ctl00_ctl00_FormContent_SiteSpecificPlaceholder_PageContent_addParliamentaryAddress_rptAddresses_ctl00_pnlTelephone") %>%
+  html_text_na() %>%
+  str_replace_all("Tel:/r/n                ", "") %>%
+  str_trim
+
+info <- c("Name" = name, "Party" = party, "Constituency" = wpc, "Westminster email" = email, "Westminster phone" = phone)
+
+if(exists("emailList")){
+  emailList <- rbind(emailList, info)
+}else{
+  emailList <- info
+}
+
+}
+
+# Save as CSV with date in file name
+write.csv(emailList,
+          file = paste0("mpContacts_", Sys.Date(), ".csv",
+          row.names = F)
