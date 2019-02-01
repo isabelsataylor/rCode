@@ -1,0 +1,34 @@
+library(readstata13)
+setwd("/Users/isabel_bwfc/Documents/Data/2015 BES")
+BES2015_W7 <- read.dta13("BES2015_W7_v1.3.dta",
+                               convert.factors = T)
+
+head(BES2015_W7)
+
+table(BES2015_W7$populism1, as.numeric(BES2015_W7$populism1))
+table(BES2015_W7$populism2, as.numeric(BES2015_W7$populism2))
+table(BES2015_W7$populism4, as.numeric(BES2015_W7$populism4))
+table(BES2015_W7$populism5, as.numeric(BES2015_W7$populism5))
+table(BES2015_W7$populism6, as.numeric(BES2015_W7$populism6))
+
+BES2015_W7$populismNew1 <- ifelse(BES2015_W7$populism1!="Don't know",
+                                  as.numeric(BES2015_W7$populism1), NA)
+BES2015_W7$populismNew2 <- ifelse(BES2015_W7$populism2!="Don't know",
+                                  as.numeric(BES2015_W7$populism2), NA)
+BES2015_W7$populismNew4 <- ifelse(BES2015_W7$populism4!="Don't know",
+                                  as.numeric(BES2015_W7$populism4), NA)
+BES2015_W7$populismNew5 <- ifelse(BES2015_W7$populism5!="Don't know",
+                                  as.numeric(BES2015_W7$populism5), NA)
+BES2015_W7$populismNew6 <- ifelse(BES2015_W7$populism6!="Don't know",
+                                  as.numeric(BES2015_W7$populism6), NA)
+
+library(mokken)
+mokkenDataPopulism <- dplyr::select(BES2015_W7, populismNew1,
+                            populismNew2, populismNew4,
+                            populismNew5, populismNew6)
+mokkenDataPopulism <- mokkenDataPopulism[complete.cases(mokkenDataPopulism[,]),]
+
+mokken::coefH(mokkenDataPopulism) # Sufficiently strong to support one latent variable & scale
+
+BES2015_W7$populismScale <- (BES2015_W7$populismNew1 + BES2015_W7$populismNew2 +
+  BES2015_W7$populismNew4 + BES2015_W7$populismNew5 + BES2015_W7$populismNew6)/5-1
